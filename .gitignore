@@ -1,6 +1,7 @@
-/comeplete_model.pth
-/RNN_file.ipynb
-/__pycache__
-/local-bert
-/model_parameters.pt
-/Originals
+# First, ignore everything
+*
+# Now, whitelist anything that's a directory
+!*/
+# And all the file types you're interested in.
+!*.py
+!*.ipynb
