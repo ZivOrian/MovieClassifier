@@ -4,13 +4,13 @@ from transformers import BertTokenizer, BertModel
 from datasets import Dataset
 
 class RNN(nn.Module):
-    def __init__(self, hidden_size=1462, output_size=19, embed_size=768, batch_size=4):
+    def __init__(self, hidden_size=3124, output_size=19, embed_size=768):
         super(RNN, self).__init__()
         self.hidden_size = hidden_size
         
         # RNN layers
-        self.rnnL1 = nn.RNNCell(embed_size, hidden_size, nonlinearity='relu')
-        self.rnnL2 = nn.RNNCell(hidden_size, embed_size, nonlinearity='relu')
+        self.rnnL1 = nn.RNNCell(embed_size, hidden_size, nonlinearity='tanh')
+        self.rnnL2 = nn.RNNCell(hidden_size, embed_size, nonlinearity='tanh')
         
         # Multi-head attention layers
         self.mha_rnn1 = nn.MultiheadAttention(hidden_size, num_heads=1, batch_first=False)
@@ -62,7 +62,6 @@ class RNN(nn.Module):
 
         batch_size, T, _ = x.shape
         device = x.device
-
         x = self.batch_norm(x)
 
         # --- Initialize hidden states for the batch ---
@@ -97,12 +96,6 @@ class RNN(nn.Module):
         mhaL1, _ = self.mha_rnn1(rnnL1_hidden_state_arr, rnnL1_hidden_state_arr, rnnL1_hidden_state_arr)
         mhaL2, _ = self.mha_rnn2(rnnL2_hidden_state_arr, rnnL2_hidden_state_arr, rnnL2_hidden_state_arr)
 
-        # --- Second Pass: Use attention context ---
-        # Re-initialize hidden states for the second pass
-        h1 = torch.zeros(batch_size, self.hidden_size, device=device)
-        #nn.init.xavier_uniform_(h1)
-        h2 = torch.zeros(batch_size, 768, device=device)
-        #nn.init.xavier_uniform_(h2)
 
         for t in range(T):
             # A single token (the input)
