@@ -1,12 +1,13 @@
 import torch
 from torch import nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from transformers import BertTokenizer, BertModel
-from datasets import Dataset
 
-class RNN(nn.Module): # highest working value for hidden size = 12_526
-    def __init__(self, hidden_size=3132, output_size=19, EMBED_SIZE=768):
+class RNN(nn.Module):
+    def __init__(self, hidden_size=2350, output_size=19, EMBED_SIZE=768):
         super(RNN, self).__init__()
         self.hidden_size = hidden_size
+        self.EMBED_SIZE = EMBED_SIZE
         
         # RNN layers
         self.rnnL1 = nn.RNNCell(EMBED_SIZE, hidden_size, nonlinearity='tanh')
@@ -20,7 +21,6 @@ class RNN(nn.Module): # highest working value for hidden size = 12_526
         self.classL = nn.Linear(EMBED_SIZE, output_size)
         
         # BERT tokenizer and model for embeddings
-        # It's good practice to load these once.
         self.bert_tokenizer = BertTokenizer.from_pretrained('./local-bert')
         self.emb_model = BertModel.from_pretrained('./local-bert')
 
@@ -32,16 +32,22 @@ class RNN(nn.Module): # highest working value for hidden size = 12_526
         # Dropout for stability
         self.dropout_attn = nn.Dropout(0.1)
 
+        # Initialize weights properly
+        self._init_weights()
 
+    def _init_weights(self):
+        """Initialize weights with Xavier/Glorot initialization"""
+        for name, param in self.named_parameters():
+            if 'weight' in name and param.dim() >= 2:
+                nn.init.xavier_uniform_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
 
     def tokenize_input(self, movie_ovrvw, device):
         """
         Tokenizes and embeds a single movie overview text.
-        NOTE: This process is run outside the training loop to save memory.
         """
         tokenized_inp = self.bert_tokenizer.tokenize(text=movie_ovrvw)
-        
-        # The 'add_prefix' logic can be simplified
         processed_tokens = ['My', 'Sentence'] + tokenized_inp
 
         model_inputs = self.bert_tokenizer.encode_plus(
@@ -50,79 +56,95 @@ class RNN(nn.Module): # highest working value for hidden size = 12_526
             return_tensors='pt'
         ).to(device)
 
-        # Use torch.no_grad() to get embeddings without tracking gradients
-        # This is crucial for memory saving when you're just doing inference/embedding.
         with torch.no_grad():
             outputs = self.emb_model(**model_inputs, return_dict=True)
             
         embeddings = outputs.last_hidden_state.squeeze(0)
         return embeddings
     
-    def forward(self, x):
+    def forward(self, x, seq_lengths):
         """
         Processes a batch of sequences through the RNN and attention layers.
+        NOW PROPERLY HANDLES PADDING!
         
         Args:
-            x (Tensor): Input tensor of shape (batch_size, seq_len, EMBED_SIZE)
+            x (Tensor): Padded input tensor of shape (batch_size, max_seq_len, EMBED_SIZE)
+            seq_lengths (Tensor): Actual lengths of each sequence (batch_size,)
         """
-        # Get batch size and sequence length from the input tensor
-
-        batch_size, T, _ = x.shape
+        batch_size, max_T, _ = x.shape
         device = x.device
 
         # Normalize input
-        x=self.input_norm(x)
+        x = self.input_norm(x)
 
-        # Initialize hidden states - use zeros, not Xavier (Xavier is for weights, not activations)
+        # Initialize hidden states with ZEROS
         h1 = torch.zeros(batch_size, self.hidden_size, device=device)
-        h2 = torch.zeros(batch_size, 768, device=device)
-
+        h2 = torch.zeros(batch_size, self.EMBED_SIZE, device=device)
 
         # First Pass: Collect hidden states
         h1_list = []
         h2_list = []
 
-        for t in range(T):
-            xt = x[:, t, :]  # Get the t-th timestep for all items in the batch
+        # Process only up to actual sequence lengths (not padding)
+        for t in range(max_T):
+            xt = x[:, t, :]
             
-            # CRITICAL FIX: Removed .detach() here.
-            # Detaching the hidden state in the loop prevents the gradient from flowing
-            # back through time, which is essential for training an RNN.
-            h1 = self.rnnL1(xt, h1)
-            h1 = self.layer_norm1(h1)
-            h2 = self.rnnL2(h1, h2)
-
+            # Create mask for valid timesteps (not padding)
+            mask = (t < seq_lengths).float().unsqueeze(1).to(device)  # (batch, 1)
+            
+            # Process timestep
+            h1_new = self.rnnL1(xt, h1)
+            h1_new = self.layer_norm1(h1_new)
+            h2_new = self.rnnL2(h1_new, h2)
+            h2_new = self.layer_norm2(h2_new)
+            
+            # ✅ KEY FIX: Only update hidden states where mask is 1 (not padding)
+            # For padded positions, keep the previous hidden state
+            h1 = mask * h1_new + (1 - mask) * h1
+            h2 = mask * h2_new + (1 - mask) * h2
             
             h1_list.append(h1)
             h2_list.append(h2)
 
-        # Stack hidden states: shape changes from list of (batch, feat) to (seq_len, batch, feat)
-        rnnL1_hidden_state_arr = torch.stack(h1_list, dim=0)
-        rnnL2_hidden_state_arr = torch.stack(h2_list, dim=0)
+        # Stack hidden states
+        rnnL1_hidden_state_arr = torch.stack(h1_list, dim=0)  # (seq_len, batch, hidden)
+        rnnL2_hidden_state_arr = torch.stack(h2_list, dim=0)  # (seq_len, batch, embed)
 
-        # --- Apply self-attention ---
-        # The MHA layer expects (seq_len, batch, embed_dim)
+        # Apply self-attention
         mhaL1, _ = self.mha_rnn1(rnnL1_hidden_state_arr, rnnL1_hidden_state_arr, rnnL1_hidden_state_arr)
         mhaL2, _ = self.mha_rnn2(rnnL2_hidden_state_arr, rnnL2_hidden_state_arr, rnnL2_hidden_state_arr)
 
-        # Additional dropout on attention outputs (applied once, not per timestep)
+        # Dropout on attention outputs
         mhaL1 = self.dropout_attn(mhaL1)
         mhaL2 = self.dropout_attn(mhaL2)
 
+        # Reset hidden states for second pass
+        h1 = torch.zeros(batch_size, self.hidden_size, device=device)
+        h2 = torch.zeros(batch_size, self.EMBED_SIZE, device=device)
 
-        for t in range(T):
-            # A single token (the input)
+        # Second pass with attention context
+        for t in range(max_T):
             xt = x[:, t, :] 
+            ctx1 = mhaL1[t, :, :]
+            ctx2 = mhaL2[t, :, :]
+
+            # Create mask for valid timesteps
+            mask = (t < seq_lengths).float().unsqueeze(1).to(device)
+
+            h1_new = self.rnnL1(xt, ctx1)
+            h1_new = self.layer_norm1(h1_new)
+            h2_new = self.rnnL2(h1_new, ctx2)
+            h2_new = self.layer_norm2(h2_new)
             
-            # Use attention output as the context for the hidden state update
-            ctx1 = mhaL1[t, :, :]  # Shape: the attention output of a single batch sample
-            ctx2 = mhaL2[t, :, :]  # Shape: (batch, 768)
+            # Only update where not padding
+            h1 = mask * h1_new + (1 - mask) * h1
+            h2 = mask * h2_new + (1 - mask) * h2
 
-            h1 = self.rnnL1(xt, ctx1)
-            h2 = self.rnnL2(h1, ctx2)
-
-        # --- Final classification ---
-        # The output is the last hidden state of the second pass
-        logits = self.classL(h2)  # h2 has shape (batch, 768)
+        # Final classification using the last valid hidden state
+        # h2 now contains the correct final state (not influenced by padding)
+        logits = self.classL(h2)
+        
+        # Clamp logits to prevent extreme values
+        logits = torch.clamp(logits, min=-10, max=10)
         
         return logits
