@@ -38,8 +38,9 @@ except FileNotFoundError:
     test_loss = []
     loss_func = nn.BCEWithLogitsLoss()
 
-    for x, target in test_loader:
-        pred = test_rnn.forward(x.to(device)).flatten().cpu()
+
+    for x, target, seq_len in test_loader:
+        pred = test_rnn.forward(x.to(device), seq_len).flatten().cpu()
         logit_target = create_smoothed_list(target=target)
         loss_value = loss_func(pred, logit_target)
         # Store as float, not tensor
@@ -52,10 +53,8 @@ except FileNotFoundError:
 
 # Plot comparison of model test performance VS model training performance 
 
-try:
-    lrn_grph = pd.read_csv("model_track.csv")
-except FileNotFoundError:
-    lrn_grph = pd.read_csv("track.csv")
+lrn_grph = pd.read_csv("model_track_epoch_0.csv")
+
 
 # Process learning loss - convert from string to numeric if needed
 lrn_loss_grph = lrn_grph["loss_arr"]

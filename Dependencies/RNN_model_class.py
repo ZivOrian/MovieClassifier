@@ -10,8 +10,8 @@ class RNN(nn.Module):
         self.EMBED_SIZE = EMBED_SIZE
         
         # RNN layers
-        self.rnnL1 = nn.RNNCell(EMBED_SIZE, hidden_size, nonlinearity='tanh')
-        self.rnnL2 = nn.RNNCell(hidden_size, EMBED_SIZE, nonlinearity='tanh')
+        self.rnnL1 = nn.RNNCell(EMBED_SIZE, hidden_size, nonlinearity='tanh',bias=True)
+        self.rnnL2 = nn.RNNCell(hidden_size, EMBED_SIZE, nonlinearity='tanh',bias=True)
         
         # Multi-head attention layers
         self.mha_rnn1 = nn.MultiheadAttention(hidden_size, num_heads=1, batch_first=False)
@@ -30,7 +30,7 @@ class RNN(nn.Module):
         self.input_norm = nn.LayerNorm(EMBED_SIZE)
 
         # Dropout for stability
-        self.dropout_attn = nn.Dropout(0.1)
+        self.dropout_attn = nn.Dropout(0.2)
 
         # Initialize weights properly
         self._init_weights()
